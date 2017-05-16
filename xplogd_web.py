@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from flask import Flask, Response, abort, jsonify, request
+from flask import Flask, Response, abort, jsonify, render_template, request
 from flask_migrate import Migrate, MigrateCommand
 from flask_script import Manager
 from flask_sqlalchemy import SQLAlchemy
@@ -10,6 +10,8 @@ from flask_sqlalchemy import SQLAlchemy
 app = Flask(__name__)
 
 app.config.setdefault('TITLE', 'XPLOGD Web')
+app.config.setdefault('OFFLINE_MSG',
+                      '<p><strong>I\'m not flying right now!</strong></p>')
 app.config.setdefault('AUTH_USERNAME', 'username')
 app.config.setdefault('AUTH_PASSWORD', 'password')
 app.config.setdefault('AIRCRAFT_SEEN_GAP_SECONDS', 30)
@@ -26,25 +28,30 @@ manager.add_command('db', MigrateCommand)
 class Aircraft(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
-    icao_type = db.Column(db.String(50))
-    registration = db.Column(db.String(50))
+    icao_type = db.Column(db.String(40))
+    registration = db.Column(db.String(40))
+    description = db.Column(db.String(260))
 
     @classmethod
-    def get_or_create(cls, icao_type, registration):
+    def get_or_create(cls, icao_type, registration, description):
         rv = cls.query.filter_by(icao_type=icao_type,
-                                 registration=registration).first()
+                                 registration=registration,
+                                 description=description).first()
         if rv is None:
-            return cls(icao_type=icao_type, registration=registration)
+            return cls(icao_type=icao_type, registration=registration,
+                       description=description)
         return rv
 
     def to_json(self):
         return {
             'icao_type': self.icao_type,
             'registration': self.registration,
+            'description': self.description,
         }
 
     def __str__(self):
-        return '%s (%s)' % (self.registration, self.icao_type)
+        return '%s (%s) - %s' % (self.registration, self.icao_type,
+                                 self.description)
 
     def __repr__(self):
         return '<Aircraft: %s>' % self
@@ -81,23 +88,23 @@ class Position(db.Model):
     @classmethod
     def create_from_xplogd(cls, data):
         pieces = data.split('\n')
-        if len(pieces) != 11:
+        if len(pieces) != 12:
             return None
 
         # check protocol version and trailing newline
-        if pieces[0] != '1' or pieces[10] != '':
+        if pieces[0] != '1' or pieces[11] != '':
             return None
 
         return cls(
-            aircraft=Aircraft.get_or_create(pieces[1], pieces[2]),
-            latitude=float(pieces[3]),
-            longitude=float(pieces[4]),
-            altitude=cls.meters_to_feets(pieces[5]),
-            track=int(float(pieces[6])),
-            ground_speed=cls.meters_per_second_to_knots(pieces[7]),
-            air_speed=cls.meters_per_second_to_knots(pieces[8]),
+            aircraft=Aircraft.get_or_create(pieces[1], pieces[2], pieces[3]),
+            latitude=float(pieces[4]),
+            longitude=float(pieces[5]),
+            altitude=cls.meters_to_feets(pieces[6]),
+            track=int(float(pieces[7])),
+            ground_speed=cls.meters_per_second_to_knots(pieces[8]),
+            air_speed=cls.meters_per_second_to_knots(pieces[9]),
             vertical_speed=cls.meters_per_second_to_feets_per_minute(
-                pieces[9]
+                pieces[10]
             )
         )
 
@@ -124,10 +131,10 @@ class Position(db.Model):
         }
 
     def __str__(self):
-        return '%s lat=%f; lon=%f; alt=%d' % (self.aircraft,
-                                              self.latitude,
-                                              self.longitude,
-                                              self.altitude)
+        return '%s: lat=%f; lon=%f; alt=%d' % (self.aircraft,
+                                               self.latitude,
+                                               self.longitude,
+                                               self.altitude)
 
     def __repr__(self):
         return '<Position: %s>' % self
@@ -148,6 +155,9 @@ def tracking():
         return '', 400
 
     pos = Position.create_from_xplogd(request.data)
+    if pos is None:
+        return '', 400
+
     db.session.add(pos)
     db.session.commit()
 
@@ -158,9 +168,16 @@ def tracking():
 def live():
     active = Position.get_active_position()
     if active is None:
-        abort(404)
+        return jsonify({})
 
     return jsonify(active.to_json())
+
+
+@app.route('/')
+def index():
+    return render_template('gmap.html',
+                           offline_msg=app.config['OFFLINE_MSG'],
+                           title=app.config['TITLE'])
 
 
 if __name__ == '__main__':
